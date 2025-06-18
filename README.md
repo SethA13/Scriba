@@ -26,7 +26,7 @@ At its core, Scriba helps you manage the complexity of a large writing project, 
 
 ## Installation
 
-### MELPA (Not yet on MELP)
+### MELPA (Not yet on MELPA)
 
 Scriba is not yet on MELPA, but once it is, you can install it via:
 
