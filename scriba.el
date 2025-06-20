@@ -64,6 +64,12 @@
 ;;;; Global Variables and Constants
 (defvar scriba-mode-map (make-keymap) "Keymap for scriba-mode minor mode.")
 (defvar scriba-menu)
+(defvar scriba--template-processing-depth 0
+	"Track template processing depth to prevent infinite loops.")
+(defvar scriba--template-variable-cache (make-hash-table :test 'equal)
+	"Cache for evaluated template variables to prevent re-evaluation.")
+(defvar scriba--debug-call-count 0
+	"Counter for debug calls.")
 
 (defconst scriba--folder-separator (file-name-as-directory "/") "System's folder separator.")
 (defconst scriba--file-ending ".org" "File ending for Scriba files.")
@@ -93,6 +99,10 @@
 
 (defconst scriba--prop-template-prefix "SCRIBA_TEMPLATE_" "Prefix for template properties in book-config.org.")
 (defconst scriba--prop-template-default "SCRIBA_TEMPLATE_DEFAULT" "Property for the default/fallback template.")
+
+(defconst scriba--prop-note-template-prefix "SCRIBA_NOTE_TEMPLATE_" "Prefix for note template properties in book-config.org.")
+(defconst scriba--prop-note-template-default "SCRIBA_NOTE_TEMPLATE_DEFAULT" "Property for the default/fallback note template.")
+(defconst scriba--prop-variable-prefix "SCRIBA_VAR_" "Prefix for custom variable properties in book-config.org.")
 ;;;; Customization Variables
 (defcustom scriba-author (user-full-name)
 	"Default author name for new book projects."
@@ -162,43 +172,55 @@ Placeholders:
 		 "#+AUTHOR: %s" ; author
 		 ""
 		 "* Settings"
-		 ":PROPERTIES:"
-		 ":SCRIBA_CONTENT_DIR: Content"
-		 ":SCRIBA_NOTES_DIR: Notes"
-		 ":SCRIBA_INDICES_DIR: Indices"
-		 ":SCRIBA_EXTRA_DIRS: Worldbuilding, Images"
-		 ""
-		 ":NOTE_CATEGORIES: Characters, Locations, Plot Points, Research"
-		 ":SCRIBA_CONTENT_TYPES: Chapter, Scene, Part"
-		 ""
-		 "COMMENT: --- Custom Content Templates ---"
-		 "COMMENT: Define templates for content types below. Use \\n for newlines."
-		 "COMMENT: The property name must be :SCRIBA_TEMPLATE_TYPENAME: (e.g., :SCRIBA_TEMPLATE_CHAPTER:)."
-		 ":SCRIBA_TEMPLATE_CHAPTER: #+TITLE: Chapter %s: %s\\n\\n* Summary\\n\\n* Manuscript\\n"
-		 ":SCRIBA_TEMPLATE_SCENE: #+TITLE: %s\\n#+SETUPFILE: ../../scriba-style.org\\n\\n- POV:: \\n- Setting:: \\n- Time:: \\n\\n* Action\\n"
-		 ":SCRIBA_TEMPLATE_DEFAULT: #+TITLE: %s\\n\\n* Overview\\n"
-		 ":END:"
+		 "  :PROPERTIES:"
+		 "  :SCRIBA_CONTENT_DIR: Content"
+		 "  :SCRIBA_NOTES_DIR: Notes"
+		 "  :SCRIBA_INDICES_DIR: Indices"
+		 "  :SCRIBA_EXTRA_DIRS: Worldbuilding, Images"
+		 "  :"
+		 "  :NOTE_CATEGORIES: Characters, Locations, Plot Points, Research"
+		 "  :SCRIBA_CONTENT_TYPES: Chapter, Scene, Part"
+		 "  :"
+		 "  COMMENT: --- Custom User-Defined Variables (Lisp code to be evaluated) ---"
+		 "  COMMENT: Define new template variables here. The value is a Lisp expression."
+		 "  :SCRIBA_VAR_POV: (completing-read \"Point of View: \" '(\"1st\" \"Some_Name\" \"Omniscient\"))"
+		 "  :SCRIBA_VAR_SETTING: (read-string \"Setting: \")"
+		 "  :"
+		 "  COMMENT: --- Custom Content Templates (use {{...}} for variables) ---"
+		 "  COMMENT: Available built-in variables: {{title}}, {{number}}, {{date}}"
+		 "  COMMENT: Custom variables (e.g., {{pov}}) are defined above."
+		 "  :SCRIBA_TEMPLATE_CHAPTER: #+TITLE: Chapter {{number}}: {{title}}\\n#+AUTHOR: %s\\n\\n* {{title}}\\n"
+		 "  :SCRIBA_TEMPLATE_SCENE: #+TITLE: {{title}}\\n#+SETUPFILE: ../../scriba-style.org\\n#+DATE: {{date}}\\n\\n- POV:: {{pov}}\\n- Setting:: {{setting}}\\n- Time:: \\n\\n* Action\\n"
+		 "  :SCRIBA_TEMPLATE_DEFAULT: #+TITLE: {{title}}\\n\\n* Overview\\n"
+		 "  :"
+		 "  COMMENT: --- Custom Note Templates ---"
+		 "  :SCRIBA_NOTE_TEMPLATE_CHARACTERS: #+TITLE: {{title}} (Character)\\n#+CATEGORY: Characters\\n\\n* Physical Description\\n\\n* Personality\\n\\n* Backstory\\n\\n* Appearances in Content\\n"
+		 "  :SCRIBA_NOTE_TEMPLATE_DEFAULT: #+TITLE: {{title}} ({{category}})\\n#+CATEGORY: {{category}}\\n\\n* Details\\n\\n* Appearances in Content\\n"
+		 "  :END:"
 		 ""
 		 "** About This File"
 		 "   This file stores project-specific settings for Scriba."
-		 "   - To define a template for a content type like 'Chapter', create a property"
-		 "     named `:SCRIBA_TEMPLATE_CHAPTER:` (all uppercase)."
-		 "   - The value of the property is the template string. Use `\\n` for newlines."
-		 "   - Placeholders like `%s` can be used. The `scriba-new-content` function"
-		 "     will pass arguments like chapter number and title."
 		 ""
-		 "   - `NOTE_CATEGORIES`: Comma-separated list of note categories."
-		 "   - `SCRIBA_CONTENT_DIR`: Default content folder name."
-		 "   - `SCRIBA_CONTENT_TYPES`: Comma-separated list of content types (e.g., Chapter, Scene)."
-		 "   - `SCRIBA_NOTES_DIR`, `SCRIBA_INDICES_DIR`: Customize the names of core project folders."
-		 "     If changed after project creation, ensure you move existing folders."
-		 "   - `SCRIBA_EXTRA_DIRS`: Comma-separated list of additional top-level directories you want"
-		 "     for your project. Scriba will create these and link to them from `main.org`."
+		 "*** User-Defined Template Variables"
+		 "    - You can create your own template variables like `{{pov}}` by defining them in the"
+		 "      properties drawer above with the prefix `:SCRIBA_VAR_` (e.g., `:SCRIBA_VAR_POV:`)."
+		 "    - The value of the property must be a valid Emacs Lisp s-expression (code)."
+		 "    - When a template containing your variable is used, Scriba will execute this code"
+		 "      and substitute the result. This allows for interactive prompts."
+		 ""
+		 "*** Structure & Built-in Templates"
+		 "    - Edit `SCRIBA_CONTENT_TYPES` and `NOTE_CATEGORIES` to customize your project menus."
+		 "    - Edit the `:SCRIBA_TEMPLATE_...` and `:SCRIBA_NOTE_TEMPLATE_...` properties to change"
+		 "      the default content for new files."
+		 "    - Use `\\n` for newlines within template strings."
+		 ""
+		 "    Run `M-x scriba-sync-folder-structure` after changing directory or category names."
 		 ) "\n")
 	"Template string for the book configuration file.
 Placeholders:
 %s (book title)
-%s (author)"
+%s (author)
+%s (author, for the default chapter template)"
 	:group 'scriba
 	:type 'string)
 
@@ -233,28 +255,6 @@ Placeholders:
 	:group 'scriba
 	:type 'string)
 
-(defcustom scriba-character-template
-	(string-join
-	 '("#+TITLE: %s (Character)"
-		 "#+CATEGORY: Characters"
-		 ""
-		 "* Physical Description"
-		 ""
-		 "* Personality & Traits"
-		 ""
-		 "* Backstory"
-		 ""
-		 "* Motivations & Goals"
-		 ""
-		 "* Relationships"
-		 ""
-		 "* Notes"
-		 ""
-		 "* Appearances in Content") "\n")
-	"Template string for new character profile files. %s -> Character Name."
-	:group 'scriba
-	:type 'string)
-
 (defcustom scriba-master-outline-filename "master-outline.org"
 	"Default filename for the compiled master outline."
 	:group 'scriba
@@ -273,195 +273,324 @@ Placeholders:
 	:type 'string)
 
 ;;;; Helper Functions
-(defun scriba--get-template-for-type (type)
-	"Retrieve the template string for a given content TYPE from book-config.org.
-The function looks for a property named :SCRIBA_TEMPLATE_TYPE: (all uppercase).
-If not found, it falls back to :SCRIBA_TEMPLATE_DEFAULT:, then to a hardcoded default."
-	(let* ((root (scriba--book-root-folder))
-				 (config-file (concat root scriba--config-filename))
-				 ;; Construct the property name, e.g., "SCRIBA_TEMPLATE_CHAPTER"
-				 (type-prop-name (concat scriba--prop-template-prefix (upcase type)))
-				 (specific-template (scriba--get-property-value type-prop-name config-file))
-				 (default-template (scriba--get-property-value scriba--prop-template-default config-file)))
-		;; The `replace-regexp-in-string` is crucial to convert "\\n" into actual newlines.
+(defun scriba--ensure-directory-exists (dir-path)
+	"Create directory if it doesn't exist, return t if created, nil otherwise."
+	(unless (file-directory-p dir-path)
+		(make-directory dir-path t)
+		t)) ; Return t to indicate a directory was created.
+
+(defun scriba--format-template-debug (template-string &rest args)
+	"Debug version with extensive logging."
+	(let ((call-id (cl-incf scriba--debug-call-count)))
+		(message "DEBUG [%d]: === STARTING TEMPLATE PROCESSING ===" call-id)
+		(message "DEBUG [%d]: Template: %S" call-id template-string)
+		(message "DEBUG [%d]: Args: %S" call-id args)
+
+		;; Check if we're already in a recursive call
+		(when (> scriba--template-processing-depth 0)
+			(message "DEBUG [%d]: WARNING - Already in template processing (depth: %d)"
+							 call-id scriba--template-processing-depth))
+
+		(when (> scriba--template-processing-depth 3)
+			(error "DEBUG [%d]: STOPPING - Template processing depth is %d"
+						 call-id scriba--template-processing-depth))
+
+		(let ((scriba--template-processing-depth (1+ scriba--template-processing-depth))
+					(content template-string)
+					(data (append args nil)))
+
+			(message "DEBUG [%d]: Processing depth now: %d" call-id scriba--template-processing-depth)
+
+			;; Add built-in values
+			(message "DEBUG [%d]: Adding built-in values..." call-id)
+			(plist-put data :date (format-time-string "<%Y-%m-%d %a>"))
+
+			;; Number logic
+			(when (and (eq (plist-get data :context) 'content) (plist-get data :type))
+				(message "DEBUG [%d]: Adding number for type: %s" call-id (plist-get data :type))
+				(let* ((root (scriba--book-root-folder))
+							 (safe-type-name (scriba--sanitize-string (plist-get data :type)))
+							 (content-base-dir (scriba--get-project-path 'content root))
+							 (type-subdir (expand-file-name safe-type-name content-base-dir)))
+					(when (file-exists-p type-subdir)
+						(plist-put data :number (number-to-string (1+ (length (directory-files type-subdir t "\\.org$"))))))))
+
+			;; Find all variables
+			(message "DEBUG [%d]: Looking for variables in: %S" call-id content)
+			(let ((variables-found '())
+						(temp-content content)
+						(safety-counter 0))
+
+				(while (and (string-match "{{\\([a-zA-Z0-9_-]+\\)}}" temp-content)
+										(< safety-counter 20)) ; Safety limit
+					(let ((var-name (match-string 1 temp-content)))
+						(message "DEBUG [%d]: Found variable: %s" call-id var-name)
+						(unless (member var-name variables-found)
+							(push var-name variables-found))
+						(setq temp-content (substring temp-content (match-end 0)))
+						(cl-incf safety-counter)))
+
+				(when (>= safety-counter 20)
+					(error "DEBUG [%d]: Too many variables found - possible infinite template" call-id))
+
+				(message "DEBUG [%d]: All variables found: %S" call-id variables-found)
+
+				;; Process each variable
+				(dolist (var-name variables-found)
+					(message "DEBUG [%d]: Processing variable: %s" call-id var-name)
+
+					(let* ((var-name-key (intern (concat ":" var-name)))
+								 (var-value (plist-get data var-name-key)))
+
+						(message "DEBUG [%d]: Pre-existing value for %s: %S" call-id var-name var-value)
+
+						;; If no pre-existing value, try to get from config
+						(unless var-value
+							(let* ((prop-name (concat scriba--prop-variable-prefix (upcase var-name)))
+										 (lisp-code (scriba--get-raw-config-property prop-name)))
+
+								(message "DEBUG [%d]: Property name: %s" call-id prop-name)
+								(message "DEBUG [%d]: Lisp code: %S" call-id lisp-code)
+
+								(when lisp-code
+									(message "DEBUG [%d]: About to evaluate: %S" call-id lisp-code)
+									(condition-case err
+											(progn
+												(setq var-value (eval (read lisp-code)))
+												(message "DEBUG [%d]: Evaluation result: %S" call-id var-value))
+										(error
+										 (message "DEBUG [%d]: ERROR evaluating %s: %S" call-id var-name err)
+										 (error "Error evaluating custom variable '{{%s}}': %s" var-name err))))))
+
+						;; Replace in content
+						(when var-value
+							(let ((old-content content)
+										(replacement (format "%s" var-value)))
+								(message "DEBUG [%d]: Replacing {{%s}} with: %S" call-id var-name replacement)
+								(setq content (replace-regexp-in-string
+															 (regexp-quote (concat "{{" var-name "}}"))
+															 replacement
+															 content t t))
+								(when (string= old-content content)
+									(message "DEBUG [%d]: WARNING - No replacement occurred for %s" call-id var-name))))))
+
+				(message "DEBUG [%d]: Final content: %S" call-id content)
+				(message "DEBUG [%d]: === ENDING TEMPLATE PROCESSING ===" call-id)
+				content))))
+
+;; Reset function
+(defun scriba--reset-debug ()
+	"Reset debug counters."
+	(interactive)
+	(setq scriba--debug-call-count 0
+				scriba--template-processing-depth 0)
+	(message "Debug state reset"))
+
+(defun scriba--format-template (template-string &rest args)
+	"A powerful template engine for Scriba.
+Replaces built-in variables like {{title}} and user-defined variables
+from the config file. ARGS is a plist of extra data, e.g., '(:type 'chapter' :name 'foo')."
+	;; Prevent infinite recursion
+	(when (> scriba--template-processing-depth 10)
+		(error "Template processing depth exceeded (>10) - possible infinite loop detected"))
+
+	(let ((scriba--template-processing-depth (1+ scriba--template-processing-depth))
+				(content template-string)
+				(data (append args nil)) ; Make a mutable copy of the arguments plist
+				(processed-vars (make-hash-table :test 'equal))) ; Track variables processed in this call
+
+		;; --- Step 1: Add built-in dynamic values to the data plist ---
+		(plist-put data :date (format-time-string "<%Y-%m-%d %a>"))
+
+		;; Add chapter/content number if applicable
+		(when (and (eq (plist-get data :context) 'content) (plist-get data :type))
+			(let* ((root (scriba--book-root-folder))
+						 (safe-type-name (scriba--sanitize-string (plist-get data :type)))
+						 ;; Fix: Use proper path construction instead of concat
+						 (content-base-dir (scriba--get-project-path 'content root))
+						 (type-subdir (expand-file-name safe-type-name content-base-dir)))
+				(when (file-exists-p type-subdir)
+					(plist-put data :number (number-to-string (1+ (length (directory-files type-subdir t "\\.org$"))))))))
+
+		;; --- Step 2: Process template variables using string replacement ---
+		;; Collect all variables first to avoid infinite loops
+		(let ((variables-to-process '()))
+			(let ((temp-content content))
+				(while (string-match "{{\\([a-zA-Z0-9_-]+\\)}}" temp-content)
+					(let ((var-name (match-string 1 temp-content)))
+						(unless (member var-name variables-to-process)
+							(push var-name variables-to-process))
+						(setq temp-content (substring temp-content (match-end 0))))))
+
+			;; Now process each unique variable once
+			(dolist (var-name-raw variables-to-process)
+				(let* ((var-name-key (intern (concat ":" var-name-raw)))
+							 (cache-key (concat "var:" var-name-raw))
+							 (var-value nil))
+
+					;; Skip if we've already processed this variable in this call
+					(unless (gethash var-name-raw processed-vars)
+						(puthash var-name-raw t processed-vars)
+
+						;; A. Check if the value was already provided or calculated
+						(setq var-value (plist-get data var-name-key))
+
+						;; B. If not, check cache first
+						(unless var-value
+							(setq var-value (gethash cache-key scriba--template-variable-cache)))
+
+						;; C. If still not found, look for a user-defined variable in the config
+						(unless var-value
+							(let* ((prop-name (concat scriba--prop-variable-prefix (upcase var-name-raw)))
+										 (lisp-code (scriba--get-raw-config-property prop-name)))
+								(when lisp-code
+									(condition-case err
+											(progn
+												;; Safely evaluate the user's Lisp code
+												(setq var-value (eval (read lisp-code)))
+												;; Cache the result
+												(puthash cache-key var-value scriba--template-variable-cache))
+										(error (error "Error evaluating custom variable '{{%s}}': %s" var-name-raw err))))))
+
+						;; D. Replace ALL occurrences of this variable in the content string
+						(if var-value
+								(let ((replacement-string (format "%s" var-value)))
+									(while (string-match (regexp-quote (concat "{{" var-name-raw "}}")) content)
+										(setq content (replace-match replacement-string t t content))))
+							;; If no value found, show warning but leave placeholder
+							(message "Warning: No value found for template variable '{{%s}}'" var-name-raw))))))
+
+		;; Return the processed content
+		content))
+
+(defun scriba--clear-template-cache ()
+	"Clear the template variable cache. Call this when config changes."
+	(interactive)
+	(clrhash scriba--template-variable-cache)
+	(message "Template variable cache cleared"))
+
+;; Helper function to reset processing state if needed
+(defun scriba--reset-template-processing ()
+	"Reset template processing state. Use if you suspect a corrupted state."
+	(interactive)
+	(setq scriba--template-processing-depth 0)
+	(scriba--clear-template-cache)
+	(message "Template processing state reset"))
+
+(defun scriba--get-note-template-for-category (category)
+	"Retrieve the template string for a given note CATEGORY from book-config.org."
+	(let* ((safe-category-name (upcase (scriba--sanitize-string category)))
+				 (type-prop-name (concat scriba--prop-note-template-prefix safe-category-name))
+				 (specific-template (scriba--get-raw-config-property type-prop-name))
+				 (default-template (scriba--get-raw-config-property scriba--prop-note-template-default)))
+		;; Process escape sequences in templates
 		(when specific-template
 			(setq specific-template (replace-regexp-in-string "\\\\n" "\n" specific-template)))
 		(when default-template
 			(setq default-template (replace-regexp-in-string "\\\\n" "\n" default-template)))
 
-		;; Return the specific template, or the default, or a hardcoded fallback.
+		;; Return the specific template, fallback to default, or a basic template
 		(or specific-template
 				default-template
-				"#+TITLE: %s\n\n* %s\n\n")))
+				"#+TITLE: {{title}} ({{category}})\n#+CATEGORY: {{category}}\n\n* Details\n\n* Appearances in Content\n")))
 
-(defun scriba--parse-config-property (property-name)
-	"Parse a comma-separated property from the book config file."
+
+(defun scriba--get-note-template-for-category (category)
+	"Retrieve the template string for a given note CATEGORY from book-config.org."
+	(let* ((safe-category-name (upcase (scriba--sanitize-string category)))
+				 (type-prop-name (concat scriba--prop-note-template-prefix safe-category-name))
+				 (specific-template (scriba--get-raw-config-property type-prop-name))
+				 (default-template (scriba--get-raw-config-property scriba--prop-note-template-default)))
+		(when specific-template
+			(setq specific-template (replace-regexp-in-string "\\\\n" "\n" specific-template)))
+		(when default-template
+			(setq default-template (replace-regexp-in-string "\\\\n" "\n" default-template)))
+		(or specific-template
+				default-template
+				"#+TITLE: {{title}} ({{category}})\n#+CATEGORY: {{category}}\n\n* Details\n\n* Appearances in Content\n")))
+
+(defun scriba--get-raw-config-property (property-name)
+	"The definitive raw property reader from book-config.org.
+This is the new single source of truth for all config properties.
+It finds the line ':PROPERTY_NAME: value' and returns 'value' as a raw string."
 	(let* ((root (scriba--book-root-folder))
-				 (config-file (expand-file-name "book-config.org" root)))
+				 (config-file (concat root scriba--config-filename)))
 		(when (file-exists-p config-file)
 			(with-temp-buffer
-				(insert-file-contents config-file)
+				(insert-file-contents-literally config-file)
 				(goto-char (point-min))
+				;; Find the property key and grab everything after it on the same line.
 				(when (re-search-forward (format "^[ \t]*:%s:[ \t]*\\(.*\\)$" property-name) nil t)
-					(let ((value (match-string-no-properties 1)))
-						(when (and value (not (string-empty-p value)))
-							(mapcar #'string-trim
-											(split-string value "," t "[ \t]*")))))))))
+					(string-trim (match-string-no-properties 1)))))))
 
-(defun scriba--get-config-directories ()
-	"Get all directory configurations from book-config.org."
-	(list
-	 :content-dir (or (car (scriba--parse-config-property "SCRIBA_CONTENT_DIR")) "Content")
-	 :content-types (scriba--parse-config-property "SCRIBA_CONTENT_TYPES")
-	 :notes-dir (or (car (scriba--parse-config-property "SCRIBA_NOTES_DIR")) "Notes")
-	 :note-categories (scriba--parse-config-property "NOTE_CATEGORIES")
-	 :indices-dir (or (car (scriba--parse-config-property "SCRIBA_INDICES_DIR")) "Indices")
-	 :extra-dirs (scriba--parse-config-property "SCRIBA_EXTRA_DIRS")))
+(defun scriba--get-list-config-property (property-name)
+	"Get a config property and parse it as a comma-separated list."
+	(let ((raw-value (scriba--get-raw-config-property property-name)))
+		(when (and raw-value (not (string-empty-p raw-value)))
+			(split-string raw-value "[ \t]*,[ \t]*" t))))
 
-(defun scriba--ensure-directory-exists (dir-path)
-	"Create directory if it doesn't exist, return t if created."
-	(unless (file-exists-p dir-path)
-		(make-directory dir-path t)
-		(message "Created directory: %s" dir-path)
-		t))
+(defun scriba--get-template-for-type (type)
+	"Retrieve the template string for a given content TYPE from book-config.org."
+	(let* ((type-prop-name (concat scriba--prop-template-prefix (upcase type)))
+				 (specific-template (scriba--get-raw-config-property type-prop-name))
+				 (default-template (scriba--get-raw-config-property scriba--prop-template-default)))
+		;; Process escape sequences in templates
+		(when specific-template
+			(setq specific-template (replace-regexp-in-string "\\\\n" "\n" specific-template)))
+		(when default-template
+			(setq default-template (replace-regexp-in-string "\\\\n" "\n" default-template)))
 
-(defun scriba--directory-empty-p (dir-path)
-	"Check if directory is empty (no files or subdirectories)."
-	(when (file-directory-p dir-path)
-		(let ((contents (directory-files dir-path nil "^[^.]")))
-			(null contents))))
-
-(defun scriba--get-expected-directories (config root)
-	"Get list of all directories that should exist based on config."
-	(let ((expected '()))
-		;; Main directories
-		(push (plist-get config :content-dir) expected)
-		(push (plist-get config :notes-dir) expected)
-		(push (plist-get config :indices-dir) expected)
-
-		;; Content type subdirectories
-		(dolist (content-type (plist-get config :content-types))
-			(push (format "%s/%s" (plist-get config :content-dir) content-type) expected))
-
-		;; Note category subdirectories
-		(dolist (category (plist-get config :note-categories))
-			(push (format "%s/%s" (plist-get config :notes-dir) category) expected))
-
-		;; Extra directories
-		(dolist (extra-dir (plist-get config :extra-dirs))
-			(push extra-dir expected))
-
-		;; Convert to absolute paths
-		(mapcar (lambda (dir) (expand-file-name dir root)) expected)))
-
-(defun scriba--find-unused-scriba-directories (config root)
-	"Find Scriba-managed directories that are no longer in config and are empty."
-	(let ((expected-dirs (scriba--get-expected-directories config root))
-				(unused-dirs '()))
-
-		;; Check content directory subdirectories
-		(let ((content-dir (expand-file-name (plist-get config :content-dir) root)))
-			(when (file-exists-p content-dir)
-				(dolist (subdir (directory-files content-dir t "^[^.]"))
-					(when (and (file-directory-p subdir)
-										 (not (member subdir expected-dirs))
-										 (scriba--directory-empty-p subdir))
-						(push subdir unused-dirs)))))
-
-		;; Check notes directory subdirectories
-		(let ((notes-dir (expand-file-name (plist-get config :notes-dir) root)))
-			(when (file-exists-p notes-dir)
-				(dolist (subdir (directory-files notes-dir t "^[^.]"))
-					(when (and (file-directory-p subdir)
-										 (not (member subdir expected-dirs))
-										 (scriba--directory-empty-p subdir))
-						(push subdir unused-dirs)))))
-
-		;; Check for unused extra directories (only if they're empty)
-		(dolist (file (directory-files root t "^[^.]"))
-			(when (and (file-directory-p file)
-								 (not (member file expected-dirs))
-								 (scriba--directory-empty-p file)
-								 ;; Only consider directories that might be Scriba-managed
-								 ;; (avoid system directories like .git, etc.)
-								 (not (string-match-p "^\\." (file-name-nondirectory file)))
-								 ;; Don't remove core project files area
-								 (not (member (file-name-nondirectory file) '("." ".."))))
-				;; Only add if it looks like it might be a Scriba directory
-				(let ((dirname (file-name-nondirectory file)))
-					(when (or (string-match-p "^[A-Z]" dirname) ; Capitalized like typical Scriba dirs
-										(member dirname '("content" "notes" "indices" "worldbuilding" "images")))
-						(push file unused-dirs)))))
-
-		unused-dirs))
-
+		;; Return the specific template, fallback to default, or a basic template
+		(or specific-template
+				default-template
+				"#+TITLE: {{title}}\n\n* Overview\n\n")))
 
 (defun scriba--sanitize-string (str)
-	"Sanitize STR for use in file names and Org links by converting it to CamelCase.
-Removes special characters and spaces, and capitalizes the first letter of each word.
-e.g., \"My new character's profile\" -> \"MyNewCharactersProfile\"."
+	"Sanitize STR for use in file names and Org links by converting it to CamelCase."
 	(let* ((trimmed (string-trim str))
-				 ;; Replace any non-alphanumeric characters with a space to ensure word separation.
 				 (spaced (replace-regexp-in-string "[^[:alnum:]]+" " " trimmed))
-				 ;; Split the string into a list of words. The 't' removes empty strings.
 				 (words (split-string spaced " +" t)))
-		;; Map over the list of words, capitalize each one, and join them together.
 		(mapconcat #'capitalize words "")))
 
 (defun scriba--book-root-folder (&optional start-dir)
-	"Return the root folder of the Scriba project.
-If START-DIR is nil, uses current buffer's directory.
-Throws an error if not in a project."
+	"Return the root folder of the Scriba project."
 	(let ((dir (or start-dir (when buffer-file-name (file-name-directory buffer-file-name)) default-directory)))
 		(unless dir (error "Cannot determine current directory"))
 		(let ((current-dir (expand-file-name dir)))
 			(while (and current-dir (not (file-exists-p (concat current-dir scriba--folder-separator scriba--config-filename))))
 				(let ((parent (file-name-directory (directory-file-name current-dir))))
 					(if (equal parent current-dir)
-							(setq current-dir nil) ; Reached filesystem root
+							(setq current-dir nil)
 						(setq current-dir parent))))
 			(unless current-dir (error "Not in a Scriba project. Config file '%s' not found." scriba--config-filename))
 			(file-name-as-directory current-dir))))
 
 (defun scriba--get-property-value (property-name file-path)
-	"Get the value of a keyword or property from an Org file.
-It first searches for a file-level keyword (e.g., '#+TITLE:').
-If not found, it then searches for the property in the first
-property drawer it finds."
+	"Get the value of a keyword or property from any Org file.
+PRIORITY: #+KEYWORD > :PROPERTIES: drawer.
+This is for general use, not for book-config.org."
 	(when (and file-path (file-readable-p file-path))
 		(with-temp-buffer
 			(insert-file-contents-literally file-path)
 			(org-mode)
 			(let (value)
-				;; 1. Prioritize file-level keywords (e.g., #+TITLE:)
 				(goto-char (point-min))
 				(when (re-search-forward
 							 (format "^#\\+%s:[ \t]*\\(.*\\)" (upcase property-name))
 							 nil t)
 					(setq value (string-trim (match-string 1))))
-
-				;; 2. If no keyword was found, look for a property drawer.
 				(unless value
 					(goto-char (point-min))
 					(when (re-search-forward org-property-drawer-re nil t)
 						(setq value (org-entry-get (point) property-name t))))
-
-				;; Return the found value.
 				value))))
-
-(defun scriba--get-config-property (property-name)
-	"Get PROPERTY-NAME from the book's config file."
-	(let* ((root (scriba--book-root-folder))
-				 (config-file (concat root scriba--config-filename)))
-		(scriba--get-property-value property-name config-file)))
 
 (defun scriba--get-customizable-folder-name (prop-key default-name)
 	"Get folder name from config or use DEFAULT-NAME."
-	(or (scriba--get-config-property prop-key) default-name))
+	(or (scriba--get-raw-config-property prop-key) default-name))
 
 (defun scriba--get-project-path (type &optional root-dir)
-	"Return the full path to a standard project directory TYPE.
-TYPE can be 'root, 'content, 'notes, 'indices, or 'config-file, 'main-file."
+	"Return the full path to a standard project directory TYPE."
 	(let ((root (or root-dir (scriba--book-root-folder))))
 		(pcase type
 			('root root)
@@ -479,8 +608,7 @@ TYPE can be 'root, 'content, 'notes, 'indices, or 'config-file, 'main-file."
 			(_ (error "Unknown project path type: %s" type)))))
 
 (defun scriba--add-link-to-index (index-file link-target link-description &optional heading-level)
-	"Add a link to the specified INDEX-FILE.
-HEADING-LEVEL defaults to 2 if not provided."
+	"Add a link to the specified INDEX-FILE."
 	(let ((level (or heading-level 2)))
 		(with-current-buffer (find-file-noselect index-file)
 			(goto-char (point-max))
@@ -488,7 +616,7 @@ HEADING-LEVEL defaults to 2 if not provided."
 			(insert (make-string level ?*) " "
 							(format "[[file:%s][%s]]\n" link-target link-description))
 			(save-buffer)
-			(unless (get-file-buffer index-file) ; If it wasn't already open
+			(unless (get-file-buffer index-file)
 				(kill-buffer (current-buffer))))))
 
 (defun scriba--string-to-file (str filename)
@@ -499,252 +627,76 @@ HEADING-LEVEL defaults to 2 if not provided."
 		(write-file filename nil)))
 
 (defun scriba--get-all-content-files ()
-	"Return a list of all content files in the project, searching recursively.
-This will find files in subdirectories like `Content/Chapter/` etc."
+	"Return a list of all content files in the project, searching recursively."
 	(let ((content-dir (scriba--get-project-path 'content)))
-		;; Ensure the content directory actually exists before trying to search it.
 		(when (file-directory-p content-dir)
-			;; Use the recursive version of directory-files.
 			(directory-files-recursively content-dir (concat scriba--file-ending "$")))))
 
 (defun scriba--get-all-note-files ()
 	"Return a list of all note files across all categories."
 	(let* ((notes-root-dir (scriba--get-project-path 'notes))
 				 (all-note-files '()))
-		(dolist (category-dir (directory-files notes-root-dir t "^[^.]"))
-			(when (file-directory-p category-dir)
-				(dolist (note-file (directory-files category-dir t (concat "^[^.].*\\" scriba--file-ending "$")))
-					(push note-file all-note-files))))
-		all-note-files))
+		(when (file-directory-p notes-root-dir)
+			(dolist (category-dir (directory-files notes-root-dir t "^[^.]"))
+				(when (file-directory-p category-dir)
+					(dolist (note-file (directory-files category-dir t (concat "^[^.].*\\" scriba--file-ending "$")))
+						(push note-file all-note-files))))
+			all-note-files)))
+
+(defun scriba--get-note-categories ()
+	"Return a list of note categories from the centralized config reader."
+	(scriba--get-list-config-property scriba--note-categories-property))
+
+(defun scriba--get-content-types ()
+	"Return a list of content types from the centralized config reader."
+	(scriba--get-list-config-property scriba--prop-content-types))
 
 ;;;; Core Functionality
-;;;###autoload
-(defun scriba-clean-unused-directories ()
-	"Remove unused empty directories that are no longer in the config."
-	(interactive)
-	(let* ((root (scriba--book-root-folder))
-				 (config (scriba--get-config-directories))
-				 (unused-dirs (scriba--find-unused-scriba-directories config root)))
-
-		(unless root
-			(error "Not in a Scriba project"))
-
-		(if unused-dirs
-				(progn
-					(with-output-to-temp-buffer "*Scriba Unused Directories*"
-						(princ "Unused Empty Directories Found\n")
-						(princ "==============================\n\n")
-						(princ "The following empty directories are not in your current config:\n\n")
-						(dolist (dir unused-dirs)
-							(princ (format "  %s\n" (file-relative-name dir root))))
-						(princ "\nUse `scriba-sync-folder-structure` with prefix argument (C-u) to remove them.\n"))
-					(message "Found %d unused empty directories - see *Scriba Unused Directories* buffer"
-									 (length unused-dirs)))
-			(message "No unused empty directories found"))))
-
-;;;###autoload
-(defun scriba-show-config-structure ()
-	"Display the current configuration and what directories would be created."
-	(interactive)
-	(let* ((root (scriba--book-root-folder))
-				 (config (scriba--get-config-directories)))
-
-		(unless root
-			(error "Not in a Scriba project"))
-
-		(with-output-to-temp-buffer "*Scriba Config Structure*"
-			(princ "Scriba Project Configuration\n")
-			(princ "============================\n\n")
-			(princ (format "Project Root: %s\n\n" root))
-
-			(princ "Main Directories:\n")
-			(princ (format "  %s/\n" (plist-get config :content-dir)))
-			(princ (format "  %s/\n" (plist-get config :notes-dir)))
-			(princ (format "  %s/\n" (plist-get config :indices-dir)))
-
-			(when (plist-get config :extra-dirs)
-				(princ "\nExtra Directories:\n")
-				(dolist (dir (plist-get config :extra-dirs))
-					(princ (format "  %s/\n" dir))))
-
-			(princ "\nContent Structure:\n")
-			(dolist (type (plist-get config :content-types))
-				(princ (format "  %s/%s/\n" (plist-get config :content-dir) type)))
-
-			(princ "\nNotes Structure:\n")
-			(dolist (category (plist-get config :note-categories))
-				(princ (format "  %s/%s/\n" (plist-get config :notes-dir) category)))
-
-			(princ "\nUse `scriba-sync-folder-structure` to create missing directories.\n"))))
-
-;;;###autoload
-(defun scriba-auto-sync-on-config-save ()
-	"Automatically sync folder structure when book-config.org is saved."
-	(when (and buffer-file-name
-						 (string-match-p "book-config\\.org$" buffer-file-name)
-						 (scriba--book-root-folder))
-		(scriba-sync-folder-structure)))
-
-;; Optional: Add hook to auto-sync when config is saved
-;; (add-hook 'after-save-hook #'scriba-auto-sync-on-config-save)
-
-;;;###autoload
 (defun scriba-sync-folder-structure (&optional clean-unused)
 	"Synchronize the project folder structure with book-config.org settings.
-With prefix argument CLEAN-UNUSED, also remove unused empty directories."
+This creates any missing directories defined in the config."
 	(interactive "P")
 	(let* ((root (scriba--book-root-folder))
-				 (config (scriba--get-config-directories))
-				 (created-dirs '())
-				 (removed-dirs '()))
-
-		(unless root
-			(error "Not in a Scriba project"))
-
-		;; Create main directories
-		(let ((content-dir (expand-file-name (plist-get config :content-dir) root))
-					(notes-dir (expand-file-name (plist-get config :notes-dir) root))
-					(indices-dir (expand-file-name (plist-get config :indices-dir) root)))
-
-			(when (scriba--ensure-directory-exists content-dir)
-				(push (plist-get config :content-dir) created-dirs))
-			(when (scriba--ensure-directory-exists notes-dir)
-				(push (plist-get config :notes-dir) created-dirs))
-			(when (scriba--ensure-directory-exists indices-dir)
-				(push (plist-get config :indices-dir) created-dirs))
-
-			;; Create content type subdirectories
-			(dolist (content-type (plist-get config :content-types))
-				(let ((type-dir (expand-file-name content-type content-dir)))
-					(when (scriba--ensure-directory-exists type-dir)
-						(push (format "%s/%s" (plist-get config :content-dir) content-type) created-dirs))))
-
-			;; Create note category subdirectories
-			(dolist (category (plist-get config :note-categories))
-				(let ((category-dir (expand-file-name category notes-dir)))
-					(when (scriba--ensure-directory-exists category-dir)
-						(push (format "%s/%s" (plist-get config :notes-dir) category) created-dirs))))
-
-			;; Create extra directories
-			(dolist (extra-dir (plist-get config :extra-dirs))
-				(let ((extra-path (expand-file-name extra-dir root)))
-					(when (scriba--ensure-directory-exists extra-path)
-						(push extra-dir created-dirs)))))
-
-		;; Clean unused directories if requested
-		(when clean-unused
-			(let ((unused-dirs (scriba--find-unused-scriba-directories config root)))
-				(when unused-dirs
-					(if (yes-or-no-p (format "Remove %d unused empty directories? " (length unused-dirs)))
-							(dolist (dir unused-dirs)
-								(condition-case err
-										(progn
-											(delete-directory dir)
-											(push (file-relative-name dir root) removed-dirs)
-											(message "Removed empty directory: %s" dir))
-									(error (message "Failed to remove directory %s: %s" dir (error-message-string err)))))
-						(message "Cleanup cancelled by user")))))
-
-		;; Report results
-		(let ((messages '()))
-			(when created-dirs
-				(push (format "Created %d directories: %s"
-											(length created-dirs)
-											(string-join (reverse created-dirs) ", "))
-							messages))
-			(when removed-dirs
-				(push (format "Removed %d empty directories: %s"
-											(length removed-dirs)
-											(string-join (reverse removed-dirs) ", "))
-							messages))
-			(if messages
-					(message "Scriba: %s" (string-join messages "; "))
-				(message "Scriba: All directories up to date - no changes needed")))))
-
-;;;###autoload
-(defun scriba-generate-relationship-graph ()
-	"Generate a clickable SVG relationship graph of all project files using Graphviz.
-The SVG is saved in the project root and opened in the default browser."
-	(interactive)
-	;; 1. Check for the Graphviz `dot` command-line tool.
-	(unless (executable-find "dot")
-		(error "Graphviz 'dot' command not found. Please install Graphviz."))
-
-	(let* ((root (scriba--book-root-folder))
-				 (nodes '())
-				 (edges '())
-				 (dot-file-path (concat root "project-graph.dot"))
-				 (svg-file-path (concat root "project-graph.svg")))
-
-		(message "Scanning project to build relationship graph...")
-
-		;; 2. Data Extraction: Iterate through all project files to define nodes and edges.
-		(let ((all-project-files
-					 (append (directory-files-recursively (scriba--get-project-path 'content root) "\\.org$")
-									 (scriba--get-all-note-files))))
-
-			(dolist (file all-project-files)
-				(let* ((node-id (scriba--sanitize-string (file-name-base file)))
-							 (node-label (file-name-base file))
-							 (node-type-raw (file-name-nondirectory (file-name-directory file)))
-							 (node-type (if (string-match-p "Content" (file-name-directory file))
-															(file-name-nondirectory (file-name-directory (file-name-directory file)))
-														node-type-raw))
-							 (node-attrs `(:label ,node-label
-																		;; This is the magic: embed a file: URL into the SVG node.
-																		:URL ,(format "file://%s" (expand-file-name file))
-																		:shape "box"
-																		:style "rounded")))
-					(push (cons node-id node-attrs) nodes)
-
-					;; Scan the current file for links to create edges.
-					(with-temp-buffer
-						(insert-file-contents file)
-						(org-mode)
-						(goto-char (point-min))
-						(while (re-search-forward "\\[\\[file:\\([^]]+\\)\\]" nil t)
-							(let* ((linked-file-relative (match-string 1))
-										 (linked-file-abs (expand-file-name linked-file-relative (file-name-directory file)))
-										 (target-node-id (when (file-exists-p linked-file-abs)
-																			 (scriba--sanitize-string (file-name-base linked-file-abs)))))
-								(when target-node-id
-									(push (format "\"%s\" -> \"%s\";" node-id target-node-id) edges))))))))
-
-		(message "Generating Graphviz DOT file...")
-
-		;; 3. DOT File Generation: Write the collected data into a .dot file.
-		(with-temp-buffer
-			(insert "digraph ScribaProject {\n")
-			(insert "  graph [rankdir=LR, splines=true, overlap=false];\n")
-			(insert "  node [style=rounded];\n\n")
-
-			;; Write node definitions
-			(dolist (node-entry nodes)
-				(let* ((id (car node-entry))
-							 (attrs (cdr node-entry))
-							 (label (plist-get attrs :label))
-							 (url (plist-get attrs :URL)))
-					(insert (format "  \"%s\" [label=\"%s\", URL=\"%s\"];\n" id label url))))
-
-			(insert "\n")
-
-			;; Write edge definitions
-			(dolist (edge (delete-dups (sort edges #'string-lessp)))
-				(insert (format "  %s\n" edge)))
-
-			(insert "}\n")
-			(write-file dot-file-path))
-
-		(message "Compiling SVG from DOT file...")
-
-		;; 4. SVG Compilation: Run the `dot` command to convert the .dot file to a clickable SVG.
-		(let ((exit-code (call-process "dot" nil nil nil "-Tsvg" dot-file-path "-o" svg-file-path)))
-			(if (= exit-code 0)
-					(progn
-						(message "Graph generated successfully! Opening %s..." svg-file-path)
-						;; 5. Open the final SVG in the user's default web browser.
-						(browse-url (format "file://%s" (expand-file-name svg-file-path))))
-				(error "Graphviz 'dot' command failed with exit code %d. Check the .dot file for errors." exit-code)))))
+				 (created-dirs '()))
+		(unless root (error "Not in a Scriba project"))
+		(message "Syncing directory structure with config...")
+		(let* (;; Get config values, providing defaults if they are nil.
+					 (content-dir-name (or (scriba--get-raw-config-property scriba--prop-content-dir) scriba--default-content-folder))
+					 (notes-dir-name (or (scriba--get-raw-config-property scriba--prop-notes-dir) scriba--default-notes-folder))
+					 (indices-dir-name (or (scriba--get-raw-config-property scriba--prop-indices-dir) scriba--default-indices-folder))
+					 (content-types (scriba--get-content-types))
+					 (note-categories (scriba--get-note-categories))
+					 (extra-dirs (scriba--get-list-config-property scriba--prop-extra-dirs))
+					 ;; Create the absolute paths for the main directories.
+					 (content-path (expand-file-name content-dir-name root))
+					 (notes-path (expand-file-name notes-dir-name root))
+					 (indices-path (expand-file-name indices-dir-name root)))
+			;; --- Create main directories ---
+			(dolist (path (list content-path notes-path indices-path))
+				(when (scriba--ensure-directory-exists path)
+					(push (file-relative-name path root) created-dirs)))
+			;; --- Create content type subdirectories ---
+			(dolist (type content-types)
+				(when type ; Ensure we don't process a nil element
+					(let ((path (expand-file-name (scriba--sanitize-string type) content-path)))
+						(when (scriba--ensure-directory-exists path)
+							(push (file-relative-name path root) created-dirs)))))
+			;; --- Create note category subdirectories ---
+			(dolist (category note-categories)
+				(when category ; Ensure we don't process a nil element
+					(let ((path (expand-file-name (scriba--sanitize-string category) notes-path)))
+						(when (scriba--ensure-directory-exists path)
+							(push (file-relative-name path root) created-dirs)))))
+			;; --- Create extra directories (at the top level) ---
+			(dolist (extra-dir extra-dirs)
+				(when extra-dir ; Ensure we don't process a nil element
+					(let ((path (expand-file-name (scriba--sanitize-string extra-dir) root)))
+						(when (scriba--ensure-directory-exists path)
+							(push (file-relative-name path root) created-dirs))))))
+		(when clean-unused (message "Cleanup of unused directories is not yet implemented."))
+		(if created-dirs
+				(message "Scriba: Synced directories: %s" (string-join (nreverse created-dirs) ", "))
+			(message "Scriba: All directories are up to date."))))
 
 (defun scriba-jump-to-file ()
 	"Provide a unified, searchable list of all project files to jump to."
@@ -804,38 +756,17 @@ The SVG is saved in the project root and opened in the default browser."
 
 ;;;###autoload
 (defun scriba-new-character (character-name)
-	"Create a new character profile note.
+	"Create a new character profile using the 'Characters' note template.
 This is a specialized wrapper around `scriba-new-note`."
 	(interactive (list (read-string "New Character Name: ")))
-	(let* ((root (scriba--book-root-folder))
-				 (safe-name (scriba--sanitize-string character-name))
-				 (note-path (concat (scriba--get-project-path 'notes root)
-														"Characters" scriba--folder-separator
-														safe-name scriba--file-ending)))
-		;; First, ensure 'Characters' is a valid category.
-		(unless (member "Characters" (scriba--get-note-categories))
-			(error "Note category 'Characters' not found in %s. Please add it." scriba--config-filename))
+	;; First, ensure 'Characters' is a valid category in the config file
+	;; before attempting to create a note in it.
+	(unless (member "Characters" (scriba--get-note-categories))
+		(error "Note category 'Characters' not found in %s. Please add it to NOTE_CATEGORIES and run sync." scriba--config-filename))
 
-		;; Use a custom template and bypass the standard `scriba-new-note` prompts
-		(make-directory (file-name-directory note-path) t)
-		(when (file-exists-p note-path)
-			(error "Character file '%s' already exists." note-path))
-
-		(scriba--string-to-file
-		 (format scriba-character-template character-name)
-		 note-path)
-
-		;; Add link to the Characters index
-		(let* ((indices-dir-name (scriba--get-customizable-folder-name scriba--prop-indices-dir scriba--default-indices-folder))
-					 (notes-dir-name (scriba--get-customizable-folder-name scriba--prop-notes-dir scriba--default-notes-folder))
-					 (category-index-path (concat (scriba--get-project-path 'indices root)
-																				"notes-Characters.org")))
-			(scriba--add-link-to-index category-index-path
-																 (concat ".." scriba--folder-separator notes-dir-name scriba--folder-separator "characters" scriba--folder-separator safe-name scriba--file-ending)
-																 character-name))
-
-		(message "Character '%s' created." character-name)
-		(find-file note-path)))
+	;; The entire logic is now just a call to the main note creation function
+	;; with the category hardcoded to "Characters".
+	(scriba-new-note "Characters" character-name))
 
 ;;;###autoload
 (defun scriba-compile-master-outline ()
@@ -886,213 +817,180 @@ This creates a single file for viewing or exporting the entire manuscript."
 
 ;;;###autoload
 (defun scriba-new-book (book-name book-path)
-	"Create a new Scriba project.
-BOOK-NAME is the title of the book.
-BOOK-PATH is the directory where the project folder will be created."
+	"Create a new Scriba project, including all configured subdirectories."
 	(interactive
 	 (list (read-string "Book Name: ")
 				 (read-directory-name "Parent Directory for Book Project: ")))
-	(let* ((safe-book-name (scriba--sanitize-string book-name))
-				 (project-root (file-name-as-directory (concat (file-name-as-directory book-path) safe-book-name)))
-				 (content-folder-name scriba--default-content-folder)
-				 (notes-folder-name scriba--default-notes-folder)
-				 (indices-folder-name scriba--default-indices-folder)
-				 (content-dir (concat project-root content-folder-name scriba--folder-separator))
-				 (notes-dir (concat project-root notes-folder-name scriba--folder-separator))
-				 (indices-dir (concat project-root indices-folder-name scriba--folder-separator))
-				 (extra-dirs-str nil)
-				 (extra-dirs-list '()))
+	(let* ((safe-book-name (file-name-as-directory (scriba--sanitize-string book-name)))
+				 (project-root (concat (file-name-as-directory book-path) safe-book-name)))
 
 		(when (file-exists-p project-root)
 			(error "Project directory '%s' already exists." project-root))
 
+		;; 1. Create the project root directory.
 		(make-directory project-root t)
-		(make-directory content-dir t)
-		(make-directory notes-dir t)
-		(make-directory indices-dir t)
 
-		;; Create config file first, as it might define extra_dirs
-		(scriba--string-to-file
-		 (format scriba-config-file-template
-						 book-name
-						 scriba-author
-						 scriba--note-categories-property
-						 scriba--prop-content-dir scriba--default-content-folder
-						 scriba--prop-content-types ; NEW
-						 scriba--prop-notes-dir scriba--default-notes-folder
-						 scriba--prop-indices-dir scriba--default-indices-folder
-						 scriba--prop-extra-dirs
-						 scriba--note-categories-property
-						 scriba--prop-content-dir
-						 scriba--prop-notes-dir
-						 scriba--prop-indices-dir
-						 scriba--prop-extra-dirs
-						 scriba--prop-content-types ; NEW
-						 )
-		 (concat project-root scriba--config-filename))
+		;; 2. Set the context to be inside the new project root for all subsequent operations.
+		(let ((default-directory project-root))
+			(let* ((config-file-path (expand-file-name scriba--config-filename))
+						 (main-file-path (expand-file-name scriba--main-filename)))
 
-		;; Read SCRIBA_EXTRA_DIRS from the newly created config
-		(setq extra-dirs-str (scriba--get-property-value scriba--prop-extra-dirs (concat project-root scriba--config-filename)))
-		(when (and extra-dirs-str (not (string-empty-p extra-dirs-str)))
-			(setq extra-dirs-list (split-string extra-dirs-str "[, ]+" t))
-			(dolist (extra-dir extra-dirs-list)
-				(make-directory (concat project-root (scriba--sanitize-string extra-dir) scriba--folder-separator) t)))
+				;; 3. Create the config file.
+				(scriba--string-to-file
+				 (format scriba-config-file-template
+								 book-name scriba-author scriba-author)
+				 config-file-path)
 
-		;; Create main file
-		(let ((main-file-content
-					 (format scriba-main-file-template
-									 book-name
-									 scriba-author
-									 indices-folder-name ; Use default here, customization applies on read
-									 scriba--sections-index-filename
-									 scriba--config-filename)))
-			(when extra-dirs-list
-				(let ((extra-links (mapconcat
-														(lambda (dir)
-															(format "  ** [[file:%s/][My %s]]" (scriba--sanitize-string dir) dir))
-														extra-dirs-list "\n")))
-					(setq main-file-content
-								(replace-regexp-in-string
-								 "^\\* Other Project Areas\n  ;; Links to extra directories.*$"
-								 (format "* Other Project Areas\n%s" extra-links)
-								 main-file-content))))
-			(scriba--string-to-file main-file-content (concat project-root scriba--main-filename)))
+				;; 4. Sync the directory structure based on the config we just wrote.
+				;;    This function is now responsible for ALL directory creation.
+				(message "Syncing project structure based on config...")
+				(scriba-sync-folder-structure)
 
+				;; 5. Now that directories are guaranteed to exist, create the initial files.
+				(let* ((indices-dir-name (or (scriba--get-raw-config-property scriba--prop-indices-dir) scriba--default-indices-folder))
+							 (extra-dirs (scriba--get-list-config-property scriba--prop-extra-dirs)))
 
-		;; Create initial Sections Index
-		(scriba--string-to-file
-		 (format "#+TITLE: Content Sections Index for %s\n\n" book-name)
-		 (concat indices-dir scriba--sections-index-filename))
+					;; Create main.org
+					(let ((main-file-content (format scriba-main-file-template
+																					 book-name scriba-author indices-dir-name
+																					 scriba--sections-index-filename scriba--config-filename)))
+						(when extra-dirs
+							(let ((extra-links (mapconcat
+																	(lambda (dir) (format "  ** [[file:%s/][%s]]" (scriba--sanitize-string dir) dir))
+																	extra-dirs "\n")))
+								(setq main-file-content
+											(replace-regexp-in-string
+											 "^\\* Other Project Areas\n  ;; Links to extra directories.*$"
+											 (format "* Other Project Areas\n%s" extra-links)
+											 main-file-content))))
+						(scriba--string-to-file main-file-content main-file-path))
 
-		;; Create the optional style file in the project root
-		(scriba--string-to-file
-		 scriba-style-file-contents
-		 (concat project-root "scriba-style.org"))
+					;; Create sections-index.org
+					(scriba--string-to-file
+					 (format "#+TITLE: Content Sections Index for %s\n\n" book-name)
+					 (expand-file-name scriba--sections-index-filename (expand-file-name indices-dir-name)))
 
-		;; Initialize Git repo and .gitignore
-		(when scriba-git-init-on-new-book
-			(with-current-buffer (find-file-noselect (concat project-root scriba--main-filename))
-				(call-process "git" nil 0 0 "-C" (shell-quote-argument project-root) "init")
-				(scriba--string-to-file scriba-default-gitignore-contents
-																(concat project-root scriba--gitignore-filename))
-				(call-process "git" nil 0 0 "-C" (shell-quote-argument project-root) "add" ".")
-				(call-process "git" nil 0 0 "-C" (shell-quote-argument project-root) "commit" "-m" "Initial project setup by Scriba.")
-				(message "Git repository initialized.")))
+					;; Create scriba-style.org
+					(scriba--string-to-file
+					 scriba-style-file-contents
+					 (expand-file-name "scriba-style.org")))
 
-		(message "Scriba project '%s' created at %s" book-name project-root)
-		(find-file (concat project-root scriba--main-filename))))
+				;; 6. Initialize Git repository.
+				(when scriba-git-init-on-new-book
+					(call-process "git" nil 0 0 "init")
+					(scriba--string-to-file scriba-default-gitignore-contents scriba--gitignore-filename)
+					(call-process "git" nil 0 0 "add" ".")
+					(call-process "git" nil 0 0 "commit" "-m" "Initial project setup by Scriba.")
+					(message "Git repository initialized."))
+
+				(message "Scriba project '%s' created successfully at %s" book-name project-root)
+				(find-file main-file-path)))))
 
 (defun scriba--get-note-categories ()
 	"Return a list of note categories from the centralized config reader."
-	(let ((config (scriba--get-config-directories)))
-		(plist-get config :note-categories)))
+	(scriba--get-list-config-property scriba--note-categories-property))
 
 (defun scriba--get-content-types ()
 	"Return a list of content types from the centralized config reader."
-	(let ((config (scriba--get-config-directories)))
-		(plist-get config :content-types)))
+	(scriba--get-list-config-property scriba--prop-content-types))
 
 ;;;###autoload
 (defun scriba-new-content (type name)
-	"Create a new content file of a specific TYPE using templates from book-config.org.
-This command creates the file in a corresponding subdirectory under the Content folder."
+	"Create a new content file of a specific TYPE using the dynamic template system."
 	(interactive
-	 (let ((types (or (scriba--get-content-types) '("Chapter" "Scene"))))
+	 (let ((types (scriba--get-content-types)))
+		 (unless types (error "No content types defined in %s." scriba--config-filename))
 		 (list (completing-read "Content Type: " types nil t (car types))
 					 (read-string "Content Name/Title: "))))
-
 	(let* ((root (scriba--book-root-folder))
 				 (safe-type-name (scriba--sanitize-string type))
 				 (safe-file-name (scriba--sanitize-string name))
-				 (content-dir (scriba--get-project-path 'content root))
-				 (type-subdir (concat content-dir safe-type-name scriba--folder-separator))
-				 (file-path (concat type-subdir safe-file-name scriba--file-ending))
-				 (template (scriba--get-template-for-type type))
-				 (final-content "")
-				 (final-title name))
-
+				 ;; Use expand-file-name for proper path construction
+				 (content-base-dir (scriba--get-project-path 'content root))
+				 (type-subdir (expand-file-name safe-type-name content-base-dir))
+				 (file-path (expand-file-name (concat safe-file-name scriba--file-ending) type-subdir))
+				 ;; Get the template for this content type
+				 (raw-template (scriba--get-template-for-type type))
+				 ;; Process the template with proper context
+				 (final-content (scriba--format-template raw-template
+																								 :context 'content
+																								 :type type
+																								 :title name))
+				 ;; Extract the final title from the processed content
+				 (final-title (with-temp-buffer
+												(insert final-content)
+												(goto-char (point-min))
+												(if (re-search-forward "^#\\+TITLE:[ \t]*\\(.*\\)" nil t)
+														(match-string 1)
+													name))))
+		;; Ensure the type subdirectory exists
 		(make-directory type-subdir t)
 
+		;; Check if file already exists
 		(when (file-exists-p file-path)
 			(error "%s file '%s' already exists." type name))
 
-		;; Format the template with the correct arguments based on type.
-		;; This allows different templates to have different numbers of placeholders.
-		(cond
-		 ((string-equal (downcase type) "chapter")
-			(let ((num (1+ (length (directory-files type-subdir t "\\.org$")))))
-				(setq final-title (format "Chapter %d: %s" num name))
-				;; The Chapter template expects two arguments: number and title.
-				(setq final-content (format template num name))))
-		 ;; For all other types, we assume the template expects one argument: the name.
-		 (t
-			(setq final-content (format template name))))
-
+		;; Create the file with the processed template content
 		(scriba--string-to-file final-content file-path)
 
-		;; Add link to the main sections index.
-		(let* ((index-path (concat (scriba--get-project-path 'indices root) scriba--sections-index-filename))
+		;; Add to index if indices are configured
+		(let* ((indices-base-dir (scriba--get-project-path 'indices root))
+					 (index-path (expand-file-name scriba--sections-index-filename indices-base-dir))
 					 (link-target (file-relative-name file-path (file-name-directory index-path))))
-			(scriba--add-link-to-index index-path link-target final-title))
+			(when (and indices-base-dir (file-exists-p (file-name-directory index-path)))
+				(scriba--add-link-to-index index-path link-target final-title)))
 
 		(message "%s '%s' created." type name)
 		(find-file file-path)))
 
 ;;;###autoload
 (defun scriba-new-note (category note-name)
-	"Create a new note within a specific category."
+	"Create a new note using the dynamic template system."
 	(interactive
 	 (let ((categories (scriba--get-note-categories)))
-		 (unless categories
-			 (error "No note categories defined. Please add '%s' property to '%s'."
-							scriba--note-categories-property scriba--config-filename))
+		 (unless categories (error "No note categories defined in %s." scriba--config-filename))
 		 (list (completing-read "Note Category: " categories nil t)
 					 (read-string "New Note Name: "))))
-
 	(let* ((root (scriba--book-root-folder))
 				 (safe-category-name (scriba--sanitize-string category))
 				 (safe-note-name (scriba--sanitize-string note-name))
-				 (notes-dir-name (scriba--get-customizable-folder-name scriba--prop-notes-dir scriba--default-notes-folder))
-				 (indices-dir-name (scriba--get-customizable-folder-name scriba--prop-indices-dir scriba--default-indices-folder))
-				 (category-dir (concat (scriba--get-project-path 'notes root) safe-category-name scriba--folder-separator))
-				 (note-file-name (concat safe-note-name scriba--file-ending))
-				 (note-path (concat category-dir note-file-name))
-				 (category-index-filename (concat scriba--note-category-index-prefix safe-category-name scriba--file-ending))
-				 (category-index-path (concat (scriba--get-project-path 'indices root) category-index-filename))
-				 (main-file-path (scriba--get-project-path 'main-file root)))
+				 ;; Use expand-file-name for proper path construction
+				 (notes-base-dir (scriba--get-project-path 'notes root))
+				 (category-dir (expand-file-name safe-category-name notes-base-dir))
+				 (note-path (expand-file-name (concat safe-note-name scriba--file-ending) category-dir))
+				 ;; Get the template for this note category
+				 (raw-template (scriba--get-note-template-for-category category))
+				 ;; Process the template with proper context
+				 (final-content (scriba--format-template raw-template
+																								 :context 'note
+																								 :category category
+																								 :title note-name)))
+		;; Ensure the category directory exists
+		(make-directory category-dir t)
 
-		(make-directory category-dir t) ; Ensure category subfolder exists
-
+		;; Check if note already exists
 		(when (file-exists-p note-path)
-			(error "Note file '%s' already exists in category '%s'." note-path category))
+			(error "Note file '%s' exists." note-path))
 
-		;; Create note file
-		(scriba--string-to-file
-		 (format scriba-note-template-string
-						 note-name category category note-name scriba--appearances-heading)
-		 note-path)
+		;; Create the note file
+		(scriba--string-to-file final-content note-path)
 
-		;; Create or update category index
-		(unless (file-exists-p category-index-path)
-			(scriba--string-to-file
-			 (format "#+TITLE: %s Notes Index\n\n" category)
-			 category-index-path)
-			;; Add link to this new category index in main.org
-			(with-current-buffer (find-file-noselect main-file-path)
-				(goto-char (point-max))
-				(when (re-search-backward "^\\* Notes Indices" nil t)
-					(goto-char (line-end-position))
-					(insert (format "\n  ** [[file:%s/%s][%s Notes]]"
-													indices-dir-name
-													category-index-filename
-													category))
-					(save-buffer))
-				(unless (get-file-buffer main-file-path)
-					(kill-buffer (current-buffer)))))
+		;; Add to category index
+		(let* ((indices-base-dir (scriba--get-project-path 'indices root))
+					 (category-index-filename (concat scriba--note-category-index-prefix safe-category-name scriba--file-ending))
+					 (category-index-path (expand-file-name category-index-filename indices-base-dir))
+					 (link-target (file-relative-name note-path (file-name-directory category-index-path))))
+			;; Ensure indices directory exists
+			(when indices-base-dir
+				(make-directory indices-base-dir t)
 
-		(scriba--add-link-to-index category-index-path
-															 (concat ".." scriba--folder-separator notes-dir-name scriba--folder-separator safe-category-name scriba--folder-separator note-file-name)
-															 note-name)
+				;; Create category index if it doesn't exist
+				(unless (file-exists-p category-index-path)
+					(scriba--string-to-file (format "#+TITLE: %s Notes Index\n\n" category) category-index-path)
+					(message "Created new index file: %s" category-index-path))
+
+				;; Add link to the category index
+				(scriba--add-link-to-index category-index-path link-target note-name)))
 
 		(message "Note '%s' created in category '%s'." note-name category)
 		(find-file note-path)))
@@ -1227,18 +1125,30 @@ Excludes the .git directory and other backup files."
 				 (project-name (file-name-nondirectory (directory-file-name root)))
 				 (timestamp (format-time-string "%Y%m%d-%H%M%S"))
 				 ;; Default to saving the backup in the parent directory
-				 (backup-dir (read-directory-name "Save backup in directory: " (concat root "../")))
-				 (zip-file (expand-file-name (format "%s-backup-%s.zip" project-name timestamp) backup-dir)))
+				 (backup-dir (read-directory-name "Save backup in directory: "
+																					(file-name-directory (directory-file-name root))))
+				 (zip-file (expand-file-name (format "%s-backup-%s.zip" project-name timestamp) backup-dir))
+				 (default-directory root)) ; This sets the working directory for call-process
 
-		(if (not (executable-find "zip"))
-				(error "The 'zip' command is not in your system's PATH.")
-			(progn
-				(message "Backing up project to %s ..." zip-file)
-				(call-process "zip" nil nil nil
-											"-r" zip-file "."
-											"-x" ".git/*" "*.zip" "*.elc" "*/.DS_Store" "*/auto-save-list/*"
-											:workdir root)
-				(message "Project backup created successfully at %s" zip-file)))))
+		(unless (executable-find "zip")
+			(error "The 'zip' command is not in your system's PATH"))
+
+		;; Ensure backup directory exists
+		(unless (file-directory-p backup-dir)
+			(error "Backup directory does not exist: %s" backup-dir))
+
+		(message "Backing up project to %s ..." zip-file)
+
+		;; Use call-process with proper working directory
+		(let ((exit-code (call-process "zip" nil "*scriba-backup*" nil
+																	 "-r" zip-file "."
+																	 "-x" ".git/*" "*.zip" "*.elc" "*/.DS_Store"
+																	 "*/auto-save-list/*" "*~" "*.bak")))
+			(if (= exit-code 0)
+					(message "Project backup created successfully at %s" zip-file)
+				(progn
+					(pop-to-buffer "*scriba-backup*")
+					(error "Backup failed with exit code %d. Check *scriba-backup* buffer for details" exit-code))))))
 
 (defun scriba--calculate-word-count-in-buffer ()
 	"Core logic for word counting, using the robust `org-element-map`.
@@ -1307,6 +1217,435 @@ This is a non-interactive worker function."
 			(insert output)
 			(goto-char (point-min))
 			(display-buffer (current-buffer)))))
+
+;;;; Relationship Graph helpers and function
+(defun scriba--write-dot-file (dot-file nodes edges graph-type &optional focus-node)
+	"Write DOT file with clickable nodes and edges."
+	(with-temp-file dot-file
+		(insert "digraph relationship_graph {\n")
+		(insert "  rankdir=LR;\n")
+		(insert "  node [shape=box, style=filled, fontname=\"Arial\"];\n")
+		(insert "  edge [fontname=\"Arial\", fontsize=10];\n")
+		(insert "  overlap=false;\n")
+		(insert "  splines=true;\n\n")
+
+		;; Write nodes with clickable URLs
+		(maphash (lambda (node-id node-info)
+							 (let* ((label (plist-get node-info :title))
+											(file-path (plist-get node-info :file))
+											;; Create emacsclient URL for opening files
+											(url (format "emacsclient://open?file=%s"
+																	 (url-hexify-string file-path)))
+											(color (scriba--get-node-color node-info focus-node node-id))
+											(shape (scriba--get-node-shape node-info)))
+								 (insert (format "  \"%s\" [label=\"%s\", URL=\"%s\", fillcolor=\"%s\", shape=%s, target=\"_parent\"];\n"
+																 node-id
+																 (scriba--escape-dot-string label)
+																 url
+																 color
+																 shape))))
+						 nodes)
+
+		(insert "\n")
+
+		;; Write edges (also clickable to show relationship details)
+		(dolist (edge edges)
+			(let* ((from (nth 0 edge))
+						 (to (nth 1 edge))
+						 (label (nth 2 edge))
+						 ;; URL for edge could show relationship info or navigate
+						 (edge-url (format "javascript:showRelationship('%s','%s','%s')"
+															 from to (or label ""))))
+				(insert (format "  \"%s\" -> \"%s\"" from to))
+				(when (and label (not (string-empty-p label)))
+					(insert (format " [label=\"%s\", URL=\"%s\", target=\"_parent\"]"
+													(scriba--escape-dot-string label) edge-url)))
+				(insert ";\n")))
+
+		(insert "}\n")))
+
+(defun scriba--get-node-color (node-info focus-node node-id)
+	"Get color for node based on type and focus status."
+	(cond
+	 ((and focus-node (string= node-id focus-node)) "lightcoral")
+	 ((string-match-p "/notes/" (plist-get node-info :file)) "lightblue")
+	 ((string-match-p "/content/" (plist-get node-info :file)) "lightgreen")
+	 (t "lightyellow")))
+
+(defun scriba--get-node-shape (node-info)
+	"Get shape for node based on file type."
+	(let ((file (plist-get node-info :file)))
+		(cond
+		 ((string-match-p "/notes/" file) "ellipse")
+		 ((string-match-p "/content/" file) "box")
+		 (t "diamond"))))
+
+(defun scriba--escape-dot-string (str)
+	"Escape special characters in string for DOT format."
+	(when str
+		(replace-regexp-in-string
+		 "\""
+		 "\\\\\""
+		 (replace-regexp-in-string "\\\\" "\\\\\\\\" str))))
+
+(defun scriba--compile-svg (dot-file svg-file)
+	"Compile DOT file to clickable SVG."
+	(let ((cmd (format "dot -Tsvg -o %s %s"
+										 (shell-quote-argument svg-file)
+										 (shell-quote-argument dot-file))))
+		(message "Compiling graph: %s" cmd)
+		(shell-command cmd)
+		(unless (file-exists-p svg-file)
+			(error "Failed to generate SVG file"))
+
+		;; Post-process SVG to enhance clickability
+		(scriba--enhance-svg-clickability svg-file)))
+
+(defun scriba--enhance-svg-clickability (svg-file)
+	"Post-process SVG to add JavaScript and improve clickability."
+	(let ((content (with-temp-buffer
+									 (insert-file-contents svg-file)
+									 (buffer-string))))
+
+		;; Add JavaScript for enhanced interaction
+		(setq content
+					(replace-regexp-in-string
+					 "</svg>"
+					 (concat
+						"<script type=\"text/javascript\">\n"
+						"<![CDATA[\n"
+						"function showRelationship(from, to, label) {\n"
+						"  alert('Relationship: ' + from + ' → ' + to + \n"
+						"        (label ? '\\nLabel: ' + label : ''));\n"
+						"}\n"
+						"\n"
+						"// Add hover effects\n"
+						"document.addEventListener('DOMContentLoaded', function() {\n"
+						"  var nodes = document.querySelectorAll('g.node');\n"
+						"  nodes.forEach(function(node) {\n"
+						"    node.addEventListener('mouseenter', function() {\n"
+						"      this.style.opacity = '0.8';\n"
+						"    });\n"
+						"    node.addEventListener('mouseleave', function() {\n"
+						"      this.style.opacity = '1.0';\n"
+						"    });\n"
+						"  });\n"
+						"});\n"
+						"]]>\n"
+						"</script>\n"
+						"</svg>")
+					 content))
+
+		;; Write enhanced SVG back
+		(with-temp-file svg-file
+			(insert content))))
+
+;; Alternative: Create HTML wrapper for better browser integration
+(defun scriba--create-html-wrapper (svg-file)
+	"Create HTML wrapper for SVG with enhanced JavaScript functionality."
+	(let* ((html-file (concat (file-name-sans-extension svg-file) ".html"))
+				 (svg-content (with-temp-buffer
+												(insert-file-contents svg-file)
+												(buffer-string))))
+
+		(with-temp-file html-file
+			(insert "<!DOCTYPE html>\n")
+			(insert "<html>\n<head>\n")
+			(insert "<title>Scriba Relationship Graph</title>\n")
+			(insert "<style>\n")
+			(insert "body { margin: 0; padding: 20px; font-family: Arial, sans-serif; }\n")
+			(insert "svg { border: 1px solid #ccc; }\n")
+			(insert ".tooltip { position: absolute; background: rgba(0,0,0,0.8); color: white; ")
+			(insert "padding: 5px; border-radius: 3px; pointer-events: none; }\n")
+			(insert "</style>\n")
+			(insert "<script>\n")
+			(insert "function openInEmacs(filepath) {\n")
+			(insert "  // For local development, try to open in Emacs\n")
+			(insert "  if (window.location.protocol === 'file:') {\n")
+			(insert "    var xhr = new XMLHttpRequest();\n")
+			(insert "    xhr.open('GET', 'http://localhost:9999/open?file=' + encodeURIComponent(filepath));\n")
+			(insert "    xhr.send();\n")
+			(insert "  } else {\n")
+			(insert "    alert('File: ' + filepath);\n")
+			(insert "  }\n")
+			(insert "}\n")
+			(insert "</script>\n")
+			(insert "</head>\n<body>\n")
+			(insert "<h1>Project Relationship Graph</h1>\n")
+			(insert svg-content)
+			(insert "</body>\n</html>")
+
+			html-file)))
+
+;; Enhanced main function
+(defun scriba-generate-relationship-graph (&optional graph-type focus-node)
+	"Generate a clickable SVG relationship graph of project files using Graphviz.
+GRAPH-TYPE can be 'full, 'content-only, 'notes-only, or 'focused.
+FOCUS-NODE specifies the central node for focused graphs.
+The SVG is saved in the project root and opened in the default browser."
+	(interactive
+	 (list (intern (completing-read "Graph type: "
+																	'("full" "content-only" "notes-only" "focused")
+																	nil t "full"))
+				 (when (string= "focused" (completing-read "Graph type: "
+																									 '("full" "content-only" "notes-only" "focused")
+																									 nil t "full"))
+					 (completing-read "Focus on node: " (scriba--get-all-node-names)))))
+
+	(unless (executable-find "dot")
+		(error "Graphviz 'dot' command not found. Please install Graphviz"))
+
+	(let* ((root (scriba--book-root-folder))
+				 (graph-type (or graph-type 'full))
+				 (timestamp (format-time-string "%Y%m%d-%H%M%S"))
+				 (graph-name (if focus-node
+												 (format "graph-%s-%s" focus-node timestamp)
+											 (format "graph-%s-%s" graph-type timestamp)))
+				 (dot-file-path (expand-file-name (concat graph-name ".dot") root))
+				 (svg-file-path (expand-file-name (concat graph-name ".svg") root))
+				 (html-file-path (expand-file-name (concat graph-name ".html") root))
+				 (nodes (make-hash-table :test 'equal))
+				 (edges '()))
+
+		(message "Scanning project to build %s relationship graph..." graph-type)
+
+		;; Collect all project files based on graph type
+		(let ((all-files (scriba--get-files-by-type graph-type)))
+			(scriba--extract-graph-data all-files nodes edges focus-node))
+
+		;; Generate DOT file with clickable elements
+		(scriba--write-dot-file dot-file-path nodes edges graph-type focus-node)
+
+		;; Compile to SVG
+		(scriba--compile-svg dot-file-path svg-file-path)
+
+		;; Create HTML wrapper for better browser integration
+		(scriba--create-html-wrapper svg-file-path)
+
+		;; Open result (prefer HTML wrapper)
+		(browse-url (format "file://%s" html-file-path))
+		(message "Clickable graph generated: %s" html-file-path)))
+
+(defun scriba--get-files-by-type (graph-type)
+	"Get project files based on GRAPH-TYPE."
+	(let ((root (scriba--book-root-folder)))
+		(pcase graph-type
+			('content-only
+			 (directory-files-recursively (scriba--get-project-path 'content root) "\\.org$"))
+			('notes-only
+			 (scriba--get-all-note-files))
+			('focused
+			 (append (directory-files-recursively (scriba--get-project-path 'content root) "\\.org$")
+							 (scriba--get-all-note-files)))
+			(_ ; 'full or default
+			 (append (directory-files-recursively (scriba--get-project-path 'content root) "\\.org$")
+							 (scriba--get-all-note-files))))))
+
+(defun scriba--extract-graph-data (files nodes edges &optional focus-node)
+	"Extract nodes and edges from FILES, optionally focusing on FOCUS-NODE."
+	(let ((focus-connections (when focus-node (make-hash-table :test 'equal))))
+
+		(dolist (file files)
+			(let* ((node-id (scriba--get-node-id file))
+						 (node-info (scriba--get-node-info file)))
+
+				;; Store node information
+				(puthash node-id node-info nodes)
+
+				;; Extract links from this file
+				(with-temp-buffer
+					(insert-file-contents file)
+					(org-mode)
+					(goto-char (point-min))
+
+					;; Find all org links
+					(while (re-search-forward "\\[\\[\\([^]]+\\)\\]\\[?\\([^]]*\\)\\]?\\]" nil t)
+						(let* ((link-target (match-string 1))
+									 (link-text (match-string 2))
+									 (target-file (scriba--resolve-link-target link-target file))
+									 (target-node-id (when target-file (scriba--get-node-id target-file))))
+
+							(when (and target-node-id (gethash target-node-id nodes))
+								(let ((edge (list node-id target-node-id link-text)))
+									(push edge edges)
+
+									;; Track focus connections
+									(when focus-node
+										(if (string= node-id focus-node)
+												(puthash target-node-id t focus-connections))
+										(if (string= target-node-id focus-node)
+												(puthash node-id t focus-connections))))))))))
+
+		;; Filter nodes for focused graph
+		(when focus-node
+			(let ((filtered-nodes (make-hash-table :test 'equal)))
+				;; Keep focus node
+				(when (gethash focus-node nodes)
+					(puthash focus-node (gethash focus-node nodes) filtered-nodes))
+				;; Keep connected nodes
+				(maphash (lambda (node-id _)
+									 (let ((node-info (gethash node-id nodes)))
+										 (when node-info
+											 (puthash node-id node-info filtered-nodes))))
+								 focus-connections)
+				;; Update nodes hash table
+				(clrhash nodes)
+				(maphash (lambda (k v) (puthash k v nodes)) filtered-nodes)
+
+				;; Filter edges
+				(setq edges (cl-remove-if-not
+										 (lambda (edge)
+											 (and (gethash (nth 0 edge) nodes)
+														(gethash (nth 1 edge) nodes)))
+										 edges))))))
+
+(defun scriba--get-node-id (file)
+	"Get a unique node ID for FILE."
+	(let* ((relative-path (file-relative-name file (scriba--book-root-folder)))
+				 (sanitized (replace-regexp-in-string "[^a-zA-Z0-9_]" "_" relative-path)))
+		sanitized))
+
+(defun scriba--get-node-info (file)
+	"Extract node information from FILE."
+	(let* ((title (scriba--extract-title file))
+				 (category (scriba--get-file-category file))
+				 (node-type (scriba--get-node-type file))
+				 (url (format "file://%s" (expand-file-name file))))
+		(list :title title
+					:category category
+					:type node-type
+					:file file
+					:url url)))
+
+(defun scriba--extract-title (file)
+	"Extract title from org FILE, fallback to filename."
+	(with-temp-buffer
+		(insert-file-contents file nil 0 1000) ; Read first 1000 chars for efficiency
+		(if (re-search-forward "^#\\+TITLE:[ \t]*\\(.*\\)" nil t)
+				(string-trim (match-string 1))
+			(file-name-base file))))
+
+(defun scriba--get-file-category (file)
+	"Determine the category of FILE."
+	(let ((dir-path (file-name-directory file))
+				(root (scriba--book-root-folder)))
+		(cond
+		 ((string-match-p "/Content/" dir-path) "Content")
+		 ((string-match-p "/Notes/" dir-path) "Notes")
+		 ((string-match-p "/Worldbuilding/" dir-path) "Worldbuilding")
+		 (t "Other"))))
+
+(defun scriba--get-node-type (file)
+	"Get the specific type of node (Chapter, Character, etc.)."
+	(let ((dir-name (file-name-nondirectory
+									 (directory-file-name
+										(file-name-directory file)))))
+		(if (member dir-name '("Content" "Notes" "Worldbuilding"))
+				(scriba--get-file-category file)
+			dir-name)))
+
+(defun scriba--resolve-link-target (link-target current-file)
+	"Resolve LINK-TARGET relative to CURRENT-FILE."
+	(cond
+	 ;; File link
+	 ((string-prefix-p "file:" link-target)
+		(let ((file-path (substring link-target 5)))
+			(if (file-name-absolute-p file-path)
+					file-path
+				(expand-file-name file-path (file-name-directory current-file)))))
+	 ;; Relative file link
+	 ((string-suffix-p ".org" link-target)
+		(expand-file-name link-target (file-name-directory current-file)))
+	 ;; Other link types - return nil
+	 (t nil)))
+
+(defun scriba--write-dot-file (dot-path nodes edges graph-type focus-node)
+	"Write DOT file to DOT-PATH with NODES and EDGES."
+	(with-temp-buffer
+		(insert (format "digraph Scriba_%s {\n" graph-type))
+		(insert "  graph [rankdir=LR, splines=true, overlap=false, concentrate=true];\n")
+		(insert "  node [style=\"rounded,filled\", fontname=\"Arial\"];\n")
+		(insert "  edge [fontname=\"Arial\", fontsize=10];\n\n")
+
+		;; Color scheme for different node types
+		(let ((colors '(("Content" . "#E3F2FD")
+										("Notes" . "#F3E5F5")
+										("Worldbuilding" . "#E8F5E8")
+										("Chapter" . "#FFE0B2")
+										("Scene" . "#FFF3E0")
+										("Characters" . "#FCE4EC")
+										("Locations" . "#E0F2F1")
+										("Other" . "#F5F5F5"))))
+
+			;; Write nodes
+			(maphash (lambda (node-id node-info)
+								 (let* ((title (plist-get node-info :title))
+												(node-type (plist-get node-info :type))
+												(url (plist-get node-info :url))
+												(color (or (cdr (assoc node-type colors)) "#F5F5F5"))
+												(is-focus (and focus-node (string= node-id focus-node))))
+									 (insert (format "  \"%s\" [label=\"%s\\n(%s)\", URL=\"%s\", fillcolor=\"%s\"%s];\n"
+																	 node-id
+																	 (scriba--escape-dot-string title)
+																	 node-type
+																	 url
+																	 color
+																	 (if is-focus ", penwidth=3, color=\"red\"" "")))))
+							 nodes))
+
+		(insert "\n")
+
+		;; Write edges
+		(dolist (edge (delete-dups edges))
+			(let ((from (nth 0 edge))
+						(to (nth 1 edge))
+						(label (nth 2 edge)))
+				(insert (format "  \"%s\" -> \"%s\"%s;\n"
+												from to
+												(if (and label (not (string-empty-p label)))
+														(format " [label=\"%s\"]" (scriba--escape-dot-string label))
+													"")))))
+
+		(insert "}\n")
+		(write-file dot-path)))
+
+(defun scriba--escape-dot-string (str)
+	"Escape string for DOT format."
+	(replace-regexp-in-string "\"" "\\\\\""
+														(replace-regexp-in-string "\n" "\\\\n" str)))
+
+(defun scriba--compile-svg (dot-path svg-path)
+	"Compile DOT file to SVG."
+	(message "Compiling SVG from DOT file...")
+	(let ((exit-code (call-process "dot" nil "*scriba-graph*" nil
+																 "-Tsvg" dot-path "-o" svg-path)))
+		(unless (= exit-code 0)
+			(pop-to-buffer "*scriba-graph*")
+			(error "Graphviz compilation failed with exit code %d" exit-code))))
+
+(defun scriba--get-all-node-names ()
+	"Get all node names for completion."
+	(let ((files (scriba--get-files-by-type 'full)))
+		(mapcar (lambda (file) (scriba--get-node-id file)) files)))
+
+;;;###autoload
+(defun scriba-generate-node-graph (node-name)
+	"Generate a focused graph for a specific NODE-NAME."
+	(interactive (list (completing-read "Focus on node: " (scriba--get-all-node-names))))
+	(scriba-generate-relationship-graph 'focused node-name))
+
+;;;###autoload
+(defun scriba-generate-content-graph ()
+	"Generate a graph showing only content relationships."
+	(interactive)
+	(scriba-generate-relationship-graph 'content-only))
+
+;;;###autoload
+(defun scriba-generate-notes-graph ()
+	"Generate a graph showing only note relationships."
+	(interactive)
+	(scriba-generate-relationship-graph 'notes-only))
+
 
 ;;;; Git Integration
 
@@ -1504,16 +1843,3 @@ functionality in Org files within a Scriba project."
 
 
 ;;; scriba.el ends here
-
-;;;	"
-;;;╭──────────────────────────── Scriba Project Menu ────────────────────────────────╮
-;;;│ Navigation        │ Creation          │ Actions                │ Git            │
-;;;├───────────────────┼───────────────────┼────────────────────────┼────────────────┤
-;;;│ _m_: Main File    │ _s_: New Section  │ _u_: Update Appearances│ _C_: Commit    │
-;;;│ _F_: Config File  │ _n_: New Note     │ _x_: Collate Book      │                │
-;;;│ _i_: Sections Idx │                   │ _e_: Export Project    │                │
-;;;│ _N_: Note Cat Idx │                   │ _S_: Project Stats     │                │
-;;;│ _o_: Open Other...│                   │ _W_: Word Count File   │                │
-;;;╰───────────────────┴───────────────────┴────────────────────────┴────────────────╯
-;;;Press 'q' to quit.
-;;;"
