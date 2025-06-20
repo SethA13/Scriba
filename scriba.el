@@ -1,9 +1,9 @@
 ;;; scriba.el --- An Org mode system for book writing -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2023-2024 Your Name
-;; Author: Your Name <your.email@example.com>
-;; Maintainer: Your Name <your.email@example.com>
-;; URL: https://your-repo-url.com
+;; Copyright (C) 2023-2024 Seth Adair
+;; Author: Seth Adair <seth1309@gmail.com>
+;; Maintainer: Seth Adair <seth1309@gmail.com>
+;; URL: https://github.com/SethA13/Scriba
 ;; Keywords: writing, outlines, notes, org, authoring, book
 ;; Prefix: scriba
 ;; Package-Requires: ((emacs "28.1") (org "9.5") (hydra "0.15.0"))
