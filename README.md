@@ -53,7 +53,7 @@ Scriba is not yet on MELPA, but once it is, you can install it via:
 ;; (add-hook 'after-save-hook #'scriba-auto-sync-on-config-save)
 ```
 
-#### Via Use-Package
+#### Via Use-Package (Preferred)
 ```elisp
 	(use-package scriba
 		:load-path "~/Documents/bookIdeas/"
