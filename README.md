@@ -26,18 +26,9 @@ At its core, Scriba helps you manage the complexity of a large writing project, 
 
 ## Installation
 
-### MELPA (Not yet on MELPA)
+### MELPA
 
-Scriba is not yet on MELPA, but once it is, you can install it via:
-
-```elisp
-;; With use-package
-(use-package scriba
-  :ensure t
-  :config
-  ;; Optionally, enable auto-syncing of folders when you save the config file.
-  ;; (add-hook 'after-save-hook #'scriba-auto-sync-on-config-save)
-  )
+Scriba is not yet on MELPA.
 ```
 
 ### Manual Installation
@@ -56,7 +47,7 @@ Scriba is not yet on MELPA, but once it is, you can install it via:
 #### Via Use-Package (Preferred)
 ```elisp
 	(use-package scriba
-		:load-path "~/Documents/bookIdeas/"
+		:load-path "" ; The folder where the package is located
 		:custom
 		(scriba-author "YourAuthorName") ; The default author name to use when exporting a story. Each story can also override this setting
 		(scriba-author-email "Contact@me") ; The default author contact email to use when exporting a story. Each story can also override this setting
