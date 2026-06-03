@@ -1,3 +1,9 @@
+# UNDERGOING A REWRITE
+
+
+
+
+
 # Scriba: A Book Writing Assistant for Org Mode
 
 Scriba is an integrated suite of tools for Emacs designed to streamline the process of writing long-form projects like novels, technical books, and dissertations using the power of Org Mode. It provides a flexible project structure, powerful creation and navigation commands, and a focus on keeping your content and research notes organized yet separate.
